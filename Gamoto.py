@@ -1,6 +1,7 @@
 import serial
 import time
 import logging
+import urwid
 
 class Gamoto:
     """
@@ -15,7 +16,8 @@ class Gamoto:
         if type(serport) != serial.Serial and real == True:
             raise serial.SerialException('Invalid serial port for real-mode operation.')
         self.s = serport # pySerial object
-        logging.basicConfig(level=loglevel)
+        self.logger = logging.getLogger('gamoto')
+        self.logger.setLevel(loglevel)
         self.real = real # if True, will actually write/read to/from serport
 
     # Register addresses follow.
@@ -59,9 +61,6 @@ class Gamoto:
         # checksum the data, add the checkbit.
         packet.append(self.checksum(packet))
 
-        for ch in packet:
-            logging.debug(hex(ord(ch)))
-
         # Write like mad!
         if self.real:
             self.s.write(''.join(packet))
@@ -82,21 +81,21 @@ class Gamoto:
         packet.append(self.checksum(packet))
 
         for ch in packet:
-            logging.debug("WRITE: " + hex(ord(ch)))
+            self.logger.debug("WRITE: " + hex(ord(ch)))
 
         if self.real:
             self.s.write(''.join(packet))
 
         response = self.s.read(2+reglen)
         answer = 0
-        if len(response) > reglen:
-            for i in xrange(reglen):
-                for ch in response:
-                    logging.debug("READ: " + hex(ord(ch)))
-                answer += ord(response[i+1])*(256**i)
+        self.logger.debug("Read register #%d", regadr)
+        for i in xrange(reglen):
+            for ch in response:
+                self.logger.debug("READ: " + hex(ord(ch)))
+            answer += ord(response[i+1])*(256**i)
             return answer
         else:
-            return 0
+            return -1
 
     def set(self, boardnum, regname, regvalue):
         return self.writereg(boardnum, self.address[regname], self.length[regname], regvalue)
@@ -139,17 +138,56 @@ class RobotControl(Gamoto):
         """You may have to remove motor power manually. Call this function and then move the arm, press enter for each waypoint.
         When you're done, press Ctrl-D and the robot should follow the waypoints in a loop infinitely."""
         self.setPower(0)
+        self.s.flushInput()
         positions = []
         try:
             while True:
                 raw_input()
                 (a, b, c) = self.readPosition()
-                logging.info("Coordinates: (%d, %d, %d)" % (a, b, c))
+                self.logger.info("Coordinates: (%d, %d, %d)" % (a, b, c))
                 positions.append((a, b, c))
+        # Remember to plug the motors back in ;)
         except EOFError:
-            self.setPower(100)
+            self.setPower(150)
             while True:
                 for i in positions:
                     self.moveUntilNear(i[0], i[1], i[2], timeout)
-            
-        
+                    
+    def moveFromList(self, positions, timeout=2):
+        while True:
+            for i in positions:
+                self.moveUntilNear(i[0], i[1], i[2], timeout)
+    
+class UrwidControl(RobotControl):
+    def addPosition(self, axis):
+        self.axisPosition[axis] += 50
+        self.setPosition(self.axisPosition[0], self.axisPosition[1], self.axisPosition[2])
+        self.txt.set_text("Position: (%d, %d, %d)" % (self.axisPosition[0], self.axisPosition[1], self.axisPosition[2]))
+    def subPosition(self, axis):
+        self.axisPosition[axis] -= 50
+        self.setPosition(self.axisPosition[0], self.axisPosition[1], self.axisPosition[2])
+        self.txt.set_text("Position: (%d, %d, %d)" % (self.axisPosition[0], self.axisPosition[1], self.axisPosition[2]))
+    def move_or_exit(self, input):
+        if input in ('q', 'Q'):
+            raise urwid.ExitMainLoop()
+        elif input == 'up':
+            self.addPosition(0)
+        elif input == 'down':
+            self.subPosition(0)
+        elif input == 'left':
+            self.subPosition(1)
+        elif input == 'right':
+            self.addPosition(1)
+        elif input == 'a':
+            if 0 < (self.axisPosition[2] + 50) < 1000:
+                self.addPosition(2)
+        elif input == 'f':
+            if 0 < (self.axisPosition[2] - 50) < 1000:
+                self.subPosition(2)
+
+    def urwidTest(self):
+        self.axisPosition = list(self.readPosition())
+        self.txt = urwid.Text("Urwid Robot Arm Test")
+        fill = urwid.Filler(self.txt, 'top')
+        loop = urwid.MainLoop(fill, unhandled_input=self.move_or_exit)
+        loop.run()
